@@ -98,11 +98,10 @@ eframe = "0.31"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde_json = "1"
 
-[target.'cfg(target_env = "ohos")'.dev-dependencies]
-serde_json = "1"
-
-[patch.crates-io]
-muda = { path = "../muda" }
+# NOTE: no [patch.crates-io] here. The OHOS fork of muda is resolved by the
+# consumer's workspace (tauri / plugins-workspace both patch muda and
+# tray-icon to their local forks); a patch in this crate's manifest would
+# only affect standalone builds of this repository and is rejected upstream.
 
 [target."cfg(target_env = \"ohos\")".dependencies]
 openharmony-ability = { path = "../openharmony-ability/crates/ability" }

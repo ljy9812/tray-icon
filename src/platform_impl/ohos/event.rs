@@ -43,6 +43,14 @@ pub fn icon_click_receiver() -> &'static Receiver<StatusBarClickEvent> {
     &ICON_CLICK_CHANNEL.1
 }
 
+/// Sends an icon click event into tray-icon's internal channel.
+/// Used by test simulation commands to inject tray click events.
+pub fn send_icon_click(click_type: String) {
+    let _ = ICON_CLICK_CHANNEL
+        .0
+        .send(StatusBarClickEvent::IconClick { click_type });
+}
+
 /// Returns the menu-click event receiver (consumed by the event-forward thread).
 pub fn menu_click_receiver() -> &'static Receiver<StatusBarClickEvent> {
     &MENU_CLICK_CHANNEL.1
@@ -97,24 +105,27 @@ pub fn start_event_forward_thread() {
                         let action = {
                             let metadata = MENU_METADATA.lock().unwrap();
                             if let Some(predefined_type) = metadata.predefined_map.get(&menu_code) {
-                                MenuAction::Predefined(predefined_type.clone())
-                            } else if metadata.check_state.contains_key(&menu_code) {
-                                MenuAction::Check(menu_code.clone())
+                                let about_metadata = metadata.about_metadata.get(&menu_code).cloned();
+                                MenuAction::Predefined { predefined_type: predefined_type.clone(), about_metadata }
                             } else {
                                 MenuAction::Regular
                             }
                         };
 
                         match action {
-                            MenuAction::Predefined(predefined_type) => {
-                                execute_predefined_action(&predefined_type);
-                            }
-                            MenuAction::Check(code) => {
-                                toggle_check_item(&code);
-                                muda::send_menu_event(code);
+                            MenuAction::Predefined { predefined_type, about_metadata } => {
+                                execute_predefined_action(&predefined_type, about_metadata);
                             }
                             MenuAction::Regular => {
-                                muda::send_menu_event(menu_code);
+                                // Check items flip muda's single check-state source
+                                // (it owns the Arc<AtomicBool> the user's
+                                // CheckMenuItem reads); the returned state tells us
+                                // what to re-push. None = not a check item.
+                                if let Some(checked) = muda::toggle_check_item(&menu_code) {
+                                    rebuild_menu_with_checked(&menu_code, checked);
+                                } else {
+                                    muda::send_menu_event(menu_code);
+                                }
                             }
                         }
                     }
@@ -125,12 +136,17 @@ pub fn start_event_forward_thread() {
 }
 
 enum MenuAction {
-    Predefined(String),
-    Check(String),
+    Predefined {
+        predefined_type: String,
+        about_metadata: Option<super::AboutMetadataJson>,
+    },
     Regular,
 }
 
-fn execute_predefined_action(predefined_type: &str) {
+fn execute_predefined_action(
+    predefined_type: &str,
+    about_metadata: Option<super::AboutMetadataJson>,
+) {
     // All predefined actions — including quit — dispatch through the
     // ohos.statusbar execute-predefined bridge. quit resolves on the ArkTS
     // side: PredefinedActionExecutor case 'quit' → context.terminateSelf(),
@@ -145,63 +161,66 @@ fn execute_predefined_action(predefined_type: &str) {
         "minimize" | "hide" | "maximize" | "close" | "fullscreen" | "about"
         | "quit"
         | "copy" | "cut" | "paste" | "selectAll" | "undo" | "redo"
-        | "recover" | "showAll" | "bringAllToFront" => {
-            let client = super::get_statusbar_client();
+        | "showAll" | "bringAllToFront" => {
+            // Serialized through the bridge worker like every other status-bar
+            // call, keeping one FIFO order (this thread used to block_on the
+            // call directly, bypassing that ordering).
             let request = openharmony_ability_plugin_statusbar::StatusBarPredefinedRequest {
                 action: predefined_type.to_string(),
+                about_metadata: about_metadata.map(Into::into),
             };
-            futures_executor::block_on(client.execute_predefined(request))
-                .map_err(|e| log::warn!("[TrayIcon] predefined action error: {}", e))
-                .ok();
+            super::dispatch_bridge_call(move || {
+                super::with_statusbar_client("execute_predefined", |client| {
+                    if let Err(e) = futures_executor::block_on(client.execute_predefined(request)) {
+                        super::record_bridge_error("execute_predefined", &e);
+                    }
+                });
+            });
         }
+        // macOS-only semantics with no OHOS counterpart — muda can still emit
+        // these on cross-platform menus, so they are listed explicitly as
+        // no-ops instead of falling into the catch-all below.
+        "hideOthers" | "services" => {}
         _ => {
             log::debug!("[TrayIcon] unsupported predefined action: {}", predefined_type);
         }
     }
 }
 
-fn toggle_check_item(menu_code: &str) {
-    let json = {
-        let mut metadata = MENU_METADATA.lock().unwrap();
-        if let Some(checked) = metadata.check_state.get_mut(menu_code) {
-            *checked = !*checked;
-        }
-        metadata.menu_json.clone()
+/// Re-pushes the tray menu with `id`'s checked state patched to `checked`, so
+/// the status bar reflects the flip muda's single check-state source just
+/// performed. Runs on this event-forward thread (a plain Rust worker —
+/// block_on here cannot deadlock the TSFN main loop).
+fn rebuild_menu_with_checked(id: &str, checked: bool) {
+    let json = MENU_METADATA.lock().unwrap().menu_json.clone();
+    let Some(json) = json else {
+        return;
     };
 
-    if let Some(json) = json {
-        rebuild_and_update_menu(&json);
-    }
-}
-
-fn rebuild_and_update_menu(json: &str) {
-    let check_state = {
-        let metadata = MENU_METADATA.lock().unwrap();
-        metadata.check_state.clone()
-    };
-
-    fn patch_items(items: &mut [serde_json::Value], check_state: &std::collections::HashMap<String, bool>) {
+    fn patch_items(items: &mut [serde_json::Value], id: &str, checked: bool) -> bool {
         for item in items.iter_mut() {
             if let Some(obj) = item.as_object_mut() {
-                if let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
-                    if let Some(&checked) = check_state.get(id) {
-                        obj.insert("checked".to_string(), serde_json::Value::Bool(checked));
-                    }
+                if obj.get("id").and_then(|v| v.as_str()) == Some(id) {
+                    obj.insert("checked".to_string(), serde_json::Value::Bool(checked));
+                    return true;
                 }
                 if let Some(sub) = obj.get_mut("submenuItems") {
                     if let Some(arr) = sub.as_array_mut() {
-                        patch_items(arr, check_state);
+                        if patch_items(arr, id, checked) {
+                            return true;
+                        }
                     }
                 }
             }
         }
+        false
     }
 
-    let mut items: Vec<serde_json::Value> = match serde_json::from_str(json) {
+    let mut items: Vec<serde_json::Value> = match serde_json::from_str(&json) {
         Ok(v) => v,
         Err(_) => return,
     };
-    patch_items(&mut items, &check_state);
+    patch_items(&mut items, id, checked);
 
     let patched_json = match serde_json::to_string(&items) {
         Ok(j) => j,
@@ -219,11 +238,12 @@ fn rebuild_and_update_menu(json: &str) {
     MENU_METADATA.lock().unwrap().flat_ids = flat_ids;
 
     if !groups.is_empty() {
-        let client = super::get_statusbar_client();
         let request = openharmony_ability_plugin_statusbar::StatusBarUpdateMenuRequest::from(&groups);
-        futures_executor::block_on(client.update_menu(request))
-            .map_err(|e| log::warn!("[TrayIcon] update_menu error in rebuild: {}", e))
-            .ok();
+        super::with_statusbar_client("update_menu", |client| {
+            if let Err(e) = futures_executor::block_on(client.update_menu(request)) {
+                super::record_bridge_error("update_menu", &e);
+            }
+        });
     }
 }
 
@@ -332,11 +352,4 @@ mod tests {
             _ => panic!("unexpected event type"),
         }
     }
-}
-
-/// Sends an icon click event into tray-icon's internal channel.
-/// Used by test simulation commands to inject tray click events.
-#[cfg(target_env = "ohos")]
-pub fn send_icon_click(click_type: String) {
-    let _ = ICON_CLICK_CHANNEL.0.send(StatusBarClickEvent::IconClick { click_type });
 }

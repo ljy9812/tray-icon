@@ -149,8 +149,22 @@ pub fn set_ohos_app(app: openharmony_ability::OpenHarmonyApp) {
     platform_impl::set_ohos_app(app);
 }
 
-/// Sends an icon click event into tray-icon's internal channel (for test simulation).
+/// Returns the last OHOS status-bar bridge error (if any).
+///
+/// Bridge calls are dispatched to a worker thread (fire-and-forget — blocking
+/// the caller would deadlock the TSFN event loop), so failures cannot be
+/// returned through the tray API's `Result`s; they are cached by the worker
+/// and exposed here for embedder (tauri) diagnostics.
 #[cfg(target_env = "ohos")]
+pub fn last_bridge_error() -> Option<crate::Error> {
+    platform_impl::last_bridge_error().map(crate::Error::OhosError)
+}
+
+/// Sends an icon click event into tray-icon's internal channel (for test
+/// simulation). Not part of the public API surface — kept exported
+/// (hidden from docs) for the frontend automation suite.
+#[cfg(target_env = "ohos")]
+#[doc(hidden)]
 pub use platform_impl::send_icon_click;
 
 /// Re-export of [muda](::muda) crate and used for tray context menu.
@@ -400,6 +414,13 @@ impl TrayIconBuilder {
     pub fn with_quick_operation(mut self, config: QuickOperationConfig) -> Self {
         self.attrs.quick_operation = Some(config);
         self
+    }
+
+    /// Returns the configured [`QuickOperationConfig`], if any. **OHOS only** —
+    /// embedders (tauri) use this to decide whether to layer their own
+    /// app-specific defaults on top.
+    pub fn quick_operation_config(&self) -> Option<&QuickOperationConfig> {
+        self.attrs.quick_operation.as_ref()
     }
 
     /// Access the unique id that will be assigned to the tray icon

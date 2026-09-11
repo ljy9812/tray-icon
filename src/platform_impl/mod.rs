@@ -28,3 +28,8 @@ pub(crate) use self::platform::*;
 
 #[cfg(target_env = "ohos")]
 pub use self::platform::send_icon_click;
+
+/// Public re-export of the cached last status-bar bridge failure, surfaced
+/// through [`crate::last_bridge_error`] for embedder diagnostics.
+#[cfg(target_env = "ohos")]
+pub use self::platform::last_bridge_error;
