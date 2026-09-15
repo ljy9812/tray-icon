@@ -61,7 +61,14 @@ pub fn set_ohos_app(app: openharmony_ability::OpenHarmonyApp) {
         .expect("Failed to create StatusBarClient");
     let menu_client = openharmony_ability_plugin_menu::MenuClient::new(&app)
         .expect("Failed to create MenuClient");
-    OHOS_APP.set(app).expect("OHOS_APP already set");
+    // Under the NG4 one-app-per-process invariant this OnceLock is set exactly
+    // once. A second set would mean someone re-ran tray init for another
+    // UIAbility instance — downgrade the panic to a warn (design D14 S42,
+    // openspec multi-uiability-windows) so a stray re-init cannot take down
+    // the whole process; the first registration stays authoritative.
+    if OHOS_APP.set(app).is_err() {
+        log::warn!("[TrayIcon] OHOS_APP already set — ignoring duplicate set_ohos_app (first registration stays authoritative)");
+    }
     if STATUSBAR_CLIENT.set(statusbar_client).is_err() {
         panic!("STATUSBAR_CLIENT already set");
     }
@@ -385,7 +392,11 @@ impl TrayIcon {
         }
     }
 
-    pub fn set_temp_dir_path<P: AsRef<std::path::Path>>(&mut self, _path: Option<P>) {}
+    pub fn set_temp_dir_path<P: AsRef<std::path::Path>>(&mut self, _path: Option<P>) {
+        // OHOS tray icons are transferred through the bridge (base64) rather
+        // than written to disk, so there is no temp dir to configure.
+        log::warn!("[tray-icon] set_temp_dir_path has no effect on OpenHarmony (icons are not written to disk)");
+    }
 
     pub fn set_icon_as_template(&mut self, is_template: bool) -> crate::Result<()> {
         // No-op if value unchanged — avoids unnecessary remove+re-add

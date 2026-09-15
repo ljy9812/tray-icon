@@ -581,10 +581,19 @@ impl TrayIcon {
     /// ## Platform-specific:
     ///
     /// - **Linux:** Unsupported.
+    /// - **OHOS:** Unsupported. Left-click behavior is configured per-icon via
+    ///   [`TrayIcon::set_quick_operation`] instead.
     pub fn set_show_menu_on_left_click(&self, enable: bool) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.tray.borrow_mut().set_show_menu_on_left_click(enable);
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(target_env = "ohos")]
+        {
+            let _ = enable;
+            log::warn!(
+                "[tray-icon] set_show_menu_on_left_click is not supported on OpenHarmony; use set_quick_operation to configure the left-click popup"
+            );
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_env = "ohos")))]
         let _ = enable;
     }
 
@@ -593,10 +602,19 @@ impl TrayIcon {
     /// ## Platform-specific:
     ///
     /// - **Linux:** Unsupported.
+    /// - **OHOS:** Unsupported. Menu presentation for status bar icons is
+    ///   system-controlled.
     pub fn set_show_menu_on_right_click(&self, enable: bool) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.tray.borrow_mut().set_show_menu_on_right_click(enable);
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(target_env = "ohos")]
+        {
+            let _ = enable;
+            log::warn!(
+                "[tray-icon] set_show_menu_on_right_click is not supported on OpenHarmony"
+            );
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_env = "ohos")))]
         let _ = enable;
     }
 
@@ -612,6 +630,10 @@ impl TrayIcon {
     pub fn show_menu(&self) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.tray.borrow().show_menu();
+        #[cfg(target_env = "ohos")]
+        log::warn!(
+            "[tray-icon] show_menu is not supported on OpenHarmony: statusBarManager has no API to programmatically trigger the menu"
+        );
     }
 
     /// Set QuickOperation for left-click popup. **OHOS only**.
